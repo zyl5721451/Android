@@ -196,8 +196,8 @@ void RenderNode::prepareTreeImpl(TreeObserver& observer, TreeInfo& info, bool fu
 
 1、位置：frameworks/base/libs/hwui/RenderNode.cpp
 2、如果当前RenderNode中有文字需要展示，则是定义为前景，需要颜色变亮
-3、如果当前RenderNode的UsageHin是Unknow，且有多于一个子节点，则定义为背景，需要颜色变暗
-4、如果当前RenderNode的UsageHin是Unknow，且有一个子节点，并且子节点不是背景，则定义为背景，需要颜色变暗
+3、如果当前RenderNode没有文字需要展示，且有多于一个子节点，则定义为背景，需要颜色变暗
+4、如果当前RenderNode没有文字需要展示，且有一个子节点，并且子节点不是背景，则定义为背景，需要颜色变暗
 5、如果有大于一个子节点，遍历子节点，如果当前节点边界包含子节点，则定义为背景，需要颜色变暗
 6、最后根据定义的背景，调用applyColorTransform进行颜色变换
 
@@ -223,16 +223,16 @@ void RenderNode::handleForceDark(android::uirenderer::TreeInfo *info) {
     if (children.size() > 1) {//有子节点
         // Crude overlap check
         SkRect drawn = SkRect::MakeEmpty();
-        for (auto iter = children.rbegin(); iter != children.rend(); ++iter) {
+        for (auto iter = children.rbegin(); iter != children.rend(); ++iter) {//逆序迭代
             const auto& child = iter->getRenderNode();//遍历到的子节点
             // We use stagingProperties here because we haven't yet sync'd the children
             SkRect bounds = SkRect::MakeXYWH(child->stagingProperties().getX(), child->stagingProperties().getY(),
                     child->stagingProperties().getWidth(), child->stagingProperties().getHeight());//子节点的边界
-            if (bounds.contains(drawn)) {//子节点边界包含其它子节点，则是背景
+            if (bounds.contains(drawn)) {//判断bounds是否包含drawn，如果drawn为空或者bounds为空，返回false。
                 // This contains everything drawn after it, so make it a background
                 child->setUsageHint(UsageHint::Background);
             }
-            drawn.join(bounds);
+            drawn.join(bounds);//取bounds和drawn的并集，如果bounds为空对drawn没影响；如果drawn为空设置drawn为bounds.
         }
     }
     mDisplayList->mDisplayList.applyColorTransform(//应用颜色变换，如果是背景则把颜色变深，如果是前景则把颜色浅
@@ -356,7 +356,7 @@ bool transformPaint(ColorTransform transform, SkPaint* paint, BitmapPalette pale
     }
 ```
 ##### 3、RecycleView ItemDecoration被加亮
-`RecycleView`的`ItemDecoration`是绘制在`RecycleView`上面的，方法  `onDrawOver`是在绘制完 `RecyelView `之后开始执行，因此在这个方法中的绘制操作会被记录在`RecycleView`的`mDisplayList`中。在`drawOver()`方法中直接调用`header.draw(canvas)`，此时`header`的`mAttachInfo`为空，所以不会走硬件加速绘制。`header`中所有`View`的绘制操作包含`TextView`都会保存在`RecycleView`的`mDisplayList`中。由于`header`中包含`TextView`所以`RecycleView`整体会被加亮，解决方法是增加一个放在`RenderNode`中的绘制背景的操作，这样即保证了文字加亮又有一个加暗的背景。
+`RecycleView`的`ItemDecoration`是绘制在`RecycleView`上面的，方法  `onDrawOver`是在绘制完 `RecyelView `之后开始执行，因此在这个方法中的绘制操作会被记录在`RecycleView`的`mDisplayList`中。在`drawOver()`方法中直接调用`header.draw(canvas)`，此时`header`的`mAttachInfo`为空，所以不会走硬件加速绘制。`header`中所有`View`的绘制操作包含`TextView`都会保存在`RecycleView`的`mDisplayList`中。由于`header`中包含`TextView`所以`RecycleView`整体会被加亮。解决方法是使用同一个`RenderNode`来画背景，多个`RenderNode`的重叠会使最底层的那个`RenderNode`变暗，由于是同一个`RenderNode`，这样绘制的时候所有在`ItemDecoration`中使用`RenderNode`绘制的背景都会被加暗，这样即保证了文字加亮又有一个加暗的背景。
 ```
   @Override
     public void onDrawOver(Canvas c, RecyclerView parent, RecyclerView.State state) {
@@ -368,22 +368,26 @@ bool transformPaint(ColorTransform transform, SkPaint* paint, BitmapPalette pale
             int top = getHeaderTop(parent, child, header, adapterPos, layoutPos);
             c.save();
             c.translate(left, top);
+            header.setTranslationX(left);
+            header.setTranslationY(top);
+            Rect rect = new Rect();
+            header.getDrawingRect(rect);
             if (android.os.Build.VERSION.SDK_INT > android.os.Build.VERSION_CODES.P) {
-                Rect rect = new Rect();
-                header.getDrawingRect(rect);
-                header.findViewById(R.id.tv_header).setBackground(null);
-                Canvas rendCanvas = mRenderNode.beginRecording();
-                rendCanvas.translate(-rect.left, -rect.top);
-                try {
-                    rendCanvas.drawRect(rect, mPaint);//绘制文字背景
-                } finally {
-                    mRenderNode.endRecording();
+                TextView textView = header.findViewById(R.id.tv_header);
+                textView.setBackground(null);
+                String des = textView.getText().toString();
+                if(isCharacter(des)){
+                    Canvas rendCanvas = mRenderNode.beginRecording();
+                    try {
+                        rendCanvas.drawRect(rect,mPaint);
+                    }finally {
+                        mRenderNode.endRecording();
+                    }
+                    mRenderNode.setPosition(rect);
+                    if(c.isHardwareAccelerated()&&mRenderNode.hasDisplayList()){
+                        c.drawRenderNode(mRenderNode);
+                    }
                 }
-                mRenderNode.setPosition(rect);
-                if (c.isHardwareAccelerated() && mRenderNode.hasDisplayList()) {
-                    c.drawRenderNode(mRenderNode);
-                }
-               
             }
             header.draw(c);
             c.restore();
@@ -403,4 +407,3 @@ bool transformPaint(ColorTransform transform, SkPaint* paint, BitmapPalette pale
 4、[https://blog.csdn.net/luoshengyang/article/details/45943255](https://blog.csdn.net/luoshengyang/article/details/45943255)
 
 5、[https://blog.csdn.net/luoshengyang/article/details/46281499](https://blog.csdn.net/luoshengyang/article/details/46281499)
-
